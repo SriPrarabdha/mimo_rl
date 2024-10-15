@@ -10,7 +10,7 @@ from DataPrep import dataPrep
 from env_ddpg import envCB
 from clustering import KMeans_only
 from function_lib import bf_gain_cal, corr_mining
-from DDPG_classes import Actor, Critic, OUNoise, init_weights
+from sac import Agent  # Import the SAC Agent instead of DDPG classes
 
 
 if __name__ == '__main__':
@@ -36,7 +36,7 @@ if __name__ == '__main__':
         'replay_memory': [],
         'replay_memory_size': 8192,
         'minibatch_size': 1024,
-        'gamma': 0
+        'gamma': 0.99  # Changed from 0 to 0.99 for SAC
     }
 
     if not os.path.exists('beams/'):
@@ -67,34 +67,15 @@ if __name__ == '__main__':
         options['ph_table'].cuda()
         options['ph_table_rep'] = options['ph_table'].repeat(options['num_ant'], 1)
 
-        # initialize DRL models
-        actor_net_list = []
-        critic_net_list = []
-        actor_net_t_list = []
-        critic_net_t_list = []
-        ounoise_list = []
+        # initialize SAC agents
+        agent_list = []
         env_list = []
         train_opt_list = []
 
         for beam_id in range(options['num_NNs']):
-            actor_net_list.append(Actor(options['num_ant'], options['num_ant']))
-            actor_net_t_list.append(Actor(options['num_ant'], options['num_ant']))
-            critic_net_list.append(Critic(2 * options['num_ant'], 1))
-            critic_net_t_list.append(Critic(2 * options['num_ant'], 1))
-            ounoise_list.append(OUNoise((1, options['num_ant'])))
+            agent_list.append(Agent(options['num_ant'], options['num_ant'], options))
             env_list.append(envCB(ch, options['num_ant'], options['num_bits'], beam_id, options))
             train_opt_list.append(copy.deepcopy(train_opt))
-
-            actor_net_list[beam_id] = actor_net_list[beam_id].cuda()
-            actor_net_t_list[beam_id] = actor_net_t_list[beam_id].cuda()
-            critic_net_list[beam_id] = critic_net_list[beam_id].cuda()
-            critic_net_t_list[beam_id] = critic_net_t_list[beam_id].cuda()
-            actor_net_list[beam_id].apply(init_weights)
-            actor_net_t_list[beam_id].load_state_dict(actor_net_list[beam_id].state_dict())
-            critic_net_list[beam_id].apply(init_weights)
-            critic_net_t_list[beam_id].load_state_dict(critic_net_list[beam_id].state_dict())
-
-        # start_time = time.time()
 
         # outer loop for randomly sampling users, emulating user dynamics
         for sample_id in range(options['num_loop']):
@@ -152,11 +133,7 @@ if __name__ == '__main__':
 
             # ---------- Learning ---------- #
             for beam_id in range(options['num_NNs']):
-                train_opt_list[beam_id] = train(actor_net_list[beam_id],
-                                                critic_net_list[beam_id],
-                                                actor_net_t_list[beam_id],
-                                                critic_net_t_list[beam_id],
-                                                ounoise_list[beam_id],
+                train_opt_list[beam_id] = train(agent_list[beam_id],
                                                 env_list[beam_id],
                                                 options,
                                                 train_opt_list[beam_id],

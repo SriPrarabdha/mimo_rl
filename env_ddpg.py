@@ -29,8 +29,8 @@ class envCB:
         self.opt_bf_gain()
         self.options = options
 
-    def step(self, input_action):  # input_action: (1, num_ant), rep: phase vector
-        self.state = input_action
+    def step(self, action):
+        self.state = torch.as_tensor(action, dtype=torch.float32).flatten().to(self.bf_vec.device)
         self.bf_vec = self.phase2bf(self.state)
         reward, bf_gain = self.reward_fn()
         terminal = 0
@@ -38,28 +38,14 @@ class envCB:
 
     def reward_fn(self):
         bf_gain = self.bf_gain_cal()
-        if bf_gain > self.previous_gain:
-            if bf_gain > self.threshold:
-                reward = np.array([1]).reshape((1, 1))
-                self.threshold = self.threshold_modif(bf_gain)
-                # print('threshold reset to: %.1f.' % self.threshold)
-            else:
-                reward = np.array([1]).reshape((1, 1))
-        else:
-            if bf_gain > self.threshold:
-                reward = np.array([1]).reshape((1, 1))
-                self.threshold = self.threshold_modif(bf_gain)
-                # print('threshold reset to: %.1f.' % self.threshold)
-            else:
-                reward = np.array([-1]).reshape((1, 1))
-        self.previous_gain = self.previous_gain_pred
-        return reward, bf_gain
+        reward = (bf_gain - self.previous_gain) / (self.previous_gain + 1e-6)  # Normalized improvement
+        self.previous_gain = bf_gain
+        return torch.tensor([[reward]], device=self.bf_vec.device), bf_gain
 
     def get_reward(self, input_action):
         inner_state = input_action
 
         # Quantization Processing
-        # self.options['ph_table_rep'].cuda()
         mat_dist = torch.abs(inner_state.reshape(self.num_ant, 1) - self.options['ph_table_rep'])
         action_quant = self.options['ph_table_rep'][range(self.num_ant), torch.argmin(mat_dist, dim=1)].reshape(1, -1)
 
@@ -67,22 +53,17 @@ class envCB:
         bf_gain = self.bf_gain_cal_only(inner_bf)
         if bf_gain > self.previous_gain:  # -1/1 reward mechanism
             if bf_gain > self.threshold:  # legacy
-                reward = np.array([1]).reshape((1, 1))
+                reward = torch.tensor([1.0], device=self.bf_vec.device).reshape((1, 1))
                 self.threshold = self.threshold_modif_get_reward(inner_bf, bf_gain)
-                # print('threshold reset to: %.1f.' % self.threshold)
             else:
-                reward = np.array([1]).reshape((1, 1))
+                reward = torch.tensor([1.0], device=self.bf_vec.device).reshape((1, 1))
         else:
             if bf_gain > self.threshold:  # legacy: never in this branch
-                reward = np.array([1]).reshape((1, 1))
+                reward = torch.tensor([1.0], device=self.bf_vec.device).reshape((1, 1))
                 self.threshold = self.threshold_modif_get_reward(inner_bf, bf_gain)
-                # print('threshold reset to: %.1f.' % self.threshold)
             else:
-                reward = np.array([-1]).reshape((1, 1))
-        # if self.count % self.record_freq == 0:
-        #     self.gain_vs_iter()
-        #     if self.count == self.record_decay_th:
-        #         self.record_freq = 1000
+                reward = torch.tensor([-1.0], device=self.bf_vec.device).reshape((1, 1))
+        
         self.previous_gain_pred = bf_gain + 0.1
         self.count += 1
         return reward, bf_gain, action_quant.clone(), action_quant.clone()
@@ -138,21 +119,22 @@ class envCB:
         # return gain_opt
 
     def phase2bf(self, ph_vec):
-        bf_vec = torch.zeros((1, 2 * self.num_ant)).float().cuda()
+        bf_vec = torch.zeros(2 * self.num_ant).cuda()
+        ph_vec = torch.as_tensor(ph_vec, dtype=torch.float32).flatten().to(self.bf_vec.device)
         for kk in range(self.num_ant):
-            bf_vec[0, 2*kk] = torch.cos(ph_vec[0, kk])
-            bf_vec[0, 2*kk+1] = torch.sin(ph_vec[0, kk])
-        return bf_vec
+            bf_vec[2*kk] = torch.cos(ph_vec[kk])
+            bf_vec[2*kk+1] = torch.sin(ph_vec[kk])
+        return bf_vec.unsqueeze(0)  # Add this line to make bf_vec 2-dimensional
 
-    def bf_gain_cal(self): # used in self.reward_fn
+    def bf_gain_cal(self):
         bf_r = self.bf_vec[0, ::2].clone().reshape(1, -1)
         bf_i = self.bf_vec[0, 1::2].clone().reshape(1, -1)
-        ch_r = torch.squeeze(self.ch[:, :self.num_ant].clone())
-        ch_i = torch.squeeze(self.ch[:, self.num_ant:].clone())
-        bf_gain_1 = torch.matmul(bf_r, torch.t(ch_r))
-        bf_gain_2 = torch.matmul(bf_i, torch.t(ch_i))
-        bf_gain_3 = torch.matmul(bf_r, torch.t(ch_i))
-        bf_gain_4 = torch.matmul(bf_i, torch.t(ch_r))
+        ch_r = self.ch[:, :self.num_ant].clone()
+        ch_i = self.ch[:, self.num_ant:].clone()
+        bf_gain_1 = torch.matmul(bf_r, ch_r.t())
+        bf_gain_2 = torch.matmul(bf_i, ch_i.t())
+        bf_gain_3 = torch.matmul(bf_r, ch_i.t())
+        bf_gain_4 = torch.matmul(bf_i, ch_r.t())
 
         bf_gain_r = (bf_gain_1+bf_gain_2)**2
         bf_gain_i = (bf_gain_3-bf_gain_4)**2
@@ -217,9 +199,8 @@ class envCB:
         return codebook
 
     def init_bf_vec(self):
-        bf_vec = torch.empty((1, 2 * self.num_ant))
-        bf_vec[0, ::2] = torch.tensor([1])
-        bf_vec[0, 1::2] = torch.tensor([0])
+        bf_vec = torch.zeros((1, 2 * self.num_ant))
+        bf_vec[0, ::2] = 1
         bf_vec = bf_vec.float().cuda()
         return bf_vec
 
@@ -232,3 +213,9 @@ class envCB:
             bf_vec[0, 2*kk] = np.real(bf_complex[0, kk])
             bf_vec[0, 2*kk+1] = np.imag(bf_complex[0, kk])
         return torch.from_numpy(bf_vec).float().cuda()
+
+    def reset(self):
+        self.state = torch.zeros((1, self.num_ant)).float().cuda()
+        self.bf_vec = self.init_bf_vec()
+        self.previous_gain = 0
+        return self.state.clone()
